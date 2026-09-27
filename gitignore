@@ -1,0 +1,14 @@
+# Database (auto-generated on first run)
+sms_database.db
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# OS
+.DS_Store
