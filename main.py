@@ -11,38 +11,42 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-DATABASE_FILE = "sms_database.db"
+DB_NAME = "sms_database.db"
 
 
-def open_connection():
-    c = sqlite3.connect(DATABASE_FILE)
-    c.execute("PRAGMA foreign_keys = ON;")
-    return c
+# ==========================================
+# DATABASE HANDLER & SECURITY
+# ==========================================
+def get_db_connection():
+    conn = sqlite3.connect(DB_NAME)
+    conn.execute("PRAGMA foreign_keys = ON;")
+    return conn
 
 
-def create_password_hash(raw_pwd, salt=None):
-    if not salt:
-        s_bytes = os.urandom(16)
+def hash_password(password, salt=None):
+    """PBKDF2 Password Hashing with Salt."""
+    if salt is None:
+        salt_bytes = os.urandom(16)
     else:
-        s_bytes = bytes.fromhex(salt)
+        salt_bytes = bytes.fromhex(salt)
 
-    derived = hashlib.pbkdf2_hmac("sha256", raw_pwd.encode("utf-8"), s_bytes, 100000)
-    return f"{s_bytes.hex()}:{derived.hex()}"
+    key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt_bytes, 100000)
+    return f"{salt_bytes.hex()}:{key.hex()}"
 
 
-def check_password(db_hash, user_input):
+def verify_password(stored_password, provided_password):
     try:
-        salt, _ = db_hash.split(":")
-        return create_password_hash(user_input, salt) == db_hash
-    except Exception:
+        salt, key = stored_password.split(":")
+        return hash_password(provided_password, salt) == stored_password
+    except ValueError:
         return False
 
 
-def setup_tables():
-    with open_connection() as conn:
-        db = conn.cursor()
+def init_db():
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
 
-        db.execute(
+        cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,7 +57,7 @@ def setup_tables():
         """
         )
 
-        db.execute(
+        cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS students (
                 roll_no TEXT PRIMARY KEY,
@@ -66,7 +70,7 @@ def setup_tables():
         """
         )
 
-        db.execute(
+        cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS marks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,7 +85,7 @@ def setup_tables():
         """
         )
 
-        db.execute(
+        cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS attendance (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,7 +97,7 @@ def setup_tables():
         """
         )
 
-        db.execute(
+        cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS activity_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,407 +108,417 @@ def setup_tables():
         """
         )
 
-        # Default system accounts
-        p_admin = create_password_hash("admin123")
-        p_teacher = create_password_hash("teacher123")
+        # Force update default accounts with PBKDF2 hashed passwords
+        admin_pass = hash_password("admin123")
+        teacher_pass = hash_password("teacher123")
 
-        db.execute(
+        cursor.execute(
             """
             INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)
             ON CONFLICT(username) DO UPDATE SET password_hash=excluded.password_hash
             """,
-            ("admin", p_admin, "Admin"),
+            ("admin", admin_pass, "Admin"),
         )
-        db.execute(
+        cursor.execute(
             """
             INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)
             ON CONFLICT(username) DO UPDATE SET password_hash=excluded.password_hash
             """,
-            ("teacher", p_teacher, "Teacher"),
+            ("teacher", teacher_pass, "Teacher"),
         )
 
 
-def record_log(user, details):
-    dt_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open_connection() as conn:
+def log_activity(username, action):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO activity_logs (username, action, timestamp) VALUES (?, ?, ?)",
-            (user, details, dt_now),
+            (username, action, now),
         )
 
 
-class LoginView:
+# ==========================================
+# LOGIN WINDOW
+# ==========================================
+class LoginWindow:
 
-    def __init__(self, master):
-        self.win = master
-        self.win.title("SMS - Login")
-        self.win.geometry("380x300")
-        self.win.resizable(False, False)
+    def __init__(self, root):
+        self.root = root
+        self.root.title("SMS - Secure Login")
+        self.root.geometry("380x300")
+        self.root.resizable(False, False)
 
         tk.Label(
-            self.win, text="Student Management System", font=("Arial", 14, "bold")
+            root, text="Student Management System", font=("Arial", 14, "bold")
         ).pack(pady=15)
 
-        pnl = tk.Frame(self.win)
-        pnl.pack(pady=10)
+        frame = tk.Frame(root)
+        frame.pack(pady=10)
 
-        tk.Label(pnl, text="Username:", font=("Arial", 10)).grid(
+        tk.Label(frame, text="Username:", font=("Arial", 10)).grid(
             row=0, column=0, sticky="w", pady=5
         )
-        self.u_input = tk.Entry(pnl, width=22)
-        self.u_input.grid(row=0, column=1, pady=5)
+        self.ent_username = tk.Entry(frame, width=22)
+        self.ent_username.grid(row=0, column=1, pady=5)
 
-        tk.Label(pnl, text="Password:", font=("Arial", 10)).grid(
+        tk.Label(frame, text="Password:", font=("Arial", 10)).grid(
             row=1, column=0, sticky="w", pady=5
         )
-        self.p_input = tk.Entry(pnl, show="*", width=22)
-        self.p_input.grid(row=1, column=1, pady=5)
+        self.ent_password = tk.Entry(frame, show="*", width=22)
+        self.ent_password.grid(row=1, column=1, pady=5)
 
         tk.Button(
-            self.win,
+            root,
             text="Login",
-            command=self.handle_login,
+            command=self.login,
             width=15,
             bg="#4CAF50",
             fg="white",
             font=("Arial", 10, "bold"),
         ).pack(pady=15)
-
         tk.Label(
-            self.win,
-            text="Admin: admin/admin123 | Teacher: teacher/teacher123",
-            fg="gray",
+            root, text="Admin: admin/admin123 | Teacher: teacher/teacher123", fg="gray"
         ).pack()
 
-    def handle_login(self):
-        usr = self.u_input.get().strip().lower()
-        pwd = self.p_input.get().strip()
+    def login(self):
+        username = self.ent_username.get().strip().lower()
+        password = self.ent_password.get().strip()
 
-        if not usr or not pwd:
+        if not username or not password:
             messagebox.showerror("Error", "Please enter both credentials.")
             return
 
-        with open_connection() as conn:
+        with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT password_hash, role FROM users WHERE LOWER(username)=?", (usr,)
+                "SELECT password_hash, role FROM users WHERE LOWER(username)=?",
+                (username,),
             )
-            account = cursor.fetchone()
+            user = cursor.fetchone()
 
-        if account and check_password(account[0], pwd):
-            usr_role = account[1]
-            record_log(usr, f"User logged in as {usr_role}")
-
-            for child in self.win.winfo_children():
-                child.destroy()
-
-            MainApp(self.win, usr, usr_role)
+        if user and verify_password(user[0], password):
+            role = user[1]
+            log_activity(username, f"User logged in as {role}")
+            
+            # Clear login window widgets
+            for widget in self.root.winfo_children():
+                widget.destroy()
+                
+            # Launch main dashboard
+            Dashboard(self.root, username, role)
         else:
             messagebox.showerror("Error", "Invalid credentials.")
 
 
-class MainApp:
+# ==========================================
+# MAIN DASHBOARD
+# ==========================================
+class Dashboard:
 
     def __init__(self, root, username, role):
         self.root = root
-        self.curr_user = username
-        self.curr_role = role
+        self.username = username
+        self.role = role
         self.root.title(
-            f"Student Management System - {self.curr_user} ({self.curr_role})"
+            f"Student Management System - Logged in: {self.username} ({self.role})"
         )
         self.root.geometry("980x640")
+        self.root.resizable(True, True)
 
-        header = tk.Frame(self.root, bg="#2196F3")
-        header.pack(fill="x")
+        title_frame = tk.Frame(self.root, bg="#2196F3")
+        title_frame.pack(fill="x")
         tk.Label(
-            header,
-            text=f"Student Management System ({self.curr_role} Panel)",
+            title_frame,
+            text=f"Student Management System ({self.role} Panel)",
             font=("Arial", 16, "bold"),
             bg="#2196F3",
             fg="white",
             pady=10,
         ).pack()
 
-        self.tabs = ttk.Notebook(self.root)
-        self.tabs.pack(fill="both", expand=True, padx=10, pady=10)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
-        self.tab_st = ttk.Frame(self.tabs)
-        self.tab_ac = ttk.Frame(self.tabs)
-        self.tab_at = ttk.Frame(self.tabs)
-        self.tab_an = ttk.Frame(self.tabs)
-        self.tab_sc = ttk.Frame(self.tabs)
+        self.tab_students = ttk.Frame(self.notebook)
+        self.tab_academics = ttk.Frame(self.notebook)
+        self.tab_attendance = ttk.Frame(self.notebook)
+        self.tab_analytics = ttk.Frame(self.notebook)
+        self.tab_security = ttk.Frame(self.notebook)
 
-        self.tabs.add(self.tab_st, text="Core Records")
-        self.tabs.add(self.tab_ac, text="Academics")
-        self.tabs.add(self.tab_at, text="Attendance")
-        self.tabs.add(self.tab_an, text="Data Analytics")
-        self.tabs.add(self.tab_sc, text="Security & Audit Logs")
+        self.notebook.add(self.tab_students, text="Core Records")
+        self.notebook.add(self.tab_academics, text="Academics")
+        self.notebook.add(self.tab_attendance, text="Attendance")
+        self.notebook.add(self.tab_analytics, text="Data Analytics")
+        self.notebook.add(self.tab_security, text="Security & Audit Logs")
 
-        self.build_students_panel()
-        self.build_academics_panel()
-        self.build_attendance_panel()
-        self.build_analytics_panel()
-        self.build_security_panel()
+        self.setup_students_tab()
+        self.setup_academics_tab()
+        self.setup_attendance_tab()
+        self.setup_analytics_tab()
+        self.setup_security_tab()
 
-        self.update_roll_lists()
+        self.refresh_student_dropdowns()
 
-    def build_grid_view(self, parent_frame, col_keys, col_labels):
-        sy = ttk.Scrollbar(parent_frame, orient="vertical")
-        sx = ttk.Scrollbar(parent_frame, orient="horizontal")
+    def create_treeview(self, parent, columns, headings):
+        scroll_y = ttk.Scrollbar(parent, orient="vertical")
+        scroll_x = ttk.Scrollbar(parent, orient="horizontal")
 
-        view = ttk.Treeview(
-            parent_frame,
-            columns=col_keys,
+        tree = ttk.Treeview(
+            parent,
+            columns=columns,
             show="headings",
-            yscrollcommand=sy.set,
-            xscrollcommand=sx.set,
+            yscrollcommand=scroll_y.set,
+            xscrollcommand=scroll_x.set,
         )
-        sy.pack(side="right", fill="y")
-        sx.pack(side="bottom", fill="x")
-        sy.config(command=view.yview)
-        sx.config(command=view.xview)
+        scroll_y.pack(side="right", fill="y")
+        scroll_x.pack(side="bottom", fill="x")
+        scroll_y.config(command=tree.yview)
+        scroll_x.config(command=tree.xview)
 
-        for k, l in zip(col_keys, col_labels):
-            view.heading(k, text=l)
-            view.column(k, width=100)
+        for col, head in zip(columns, headings):
+            tree.heading(col, text=head)
+            tree.column(col, width=100)
 
-        view.pack(fill="both", expand=True)
-        return view
+        tree.pack(fill="both", expand=True)
+        return tree
 
-    # 1. Students Panel
-    def build_students_panel(self):
-        side_box = tk.LabelFrame(
-            self.tab_st, text="Student Info", font=("Arial", 10, "bold")
+    # ------------------------------------------
+    # TAB 1: CORE STUDENTS
+    # ------------------------------------------
+    def setup_students_tab(self):
+        form_frame = tk.LabelFrame(
+            self.tab_students, text="Student Info", font=("Arial", 10, "bold")
         )
-        side_box.place(x=10, y=10, width=280, height=500)
+        form_frame.place(x=10, y=10, width=280, height=500)
 
-        field_names = [
+        fields = [
             ("Roll No:", "roll_no"),
             ("Name:", "name"),
             ("Course:", "course"),
             ("Email:", "email"),
         ]
-        self.st_inputs = {}
+        self.student_entries = {}
 
-        for idx, (label, key) in enumerate(field_names):
-            tk.Label(side_box, text=label).grid(
-                row=idx, column=0, sticky="w", padx=8, pady=8
+        for i, (label_text, field_name) in enumerate(fields):
+            tk.Label(form_frame, text=label_text).grid(
+                row=i, column=0, sticky="w", padx=8, pady=8
             )
-            inp = tk.Entry(side_box, width=18)
-            inp.grid(row=idx, column=1, padx=8, pady=8)
-            self.st_inputs[key] = inp
+            ent = tk.Entry(form_frame, width=18)
+            ent.grid(row=i, column=1, padx=8, pady=8)
+            self.student_entries[field_name] = ent
 
-        tk.Label(side_box, text="Gender:").grid(
+        tk.Label(form_frame, text="Gender:").grid(
             row=4, column=0, sticky="w", padx=8, pady=8
         )
-        self.sel_gender = ttk.Combobox(
-            side_box, values=["Male", "Female", "Other"], width=15, state="readonly"
+        self.combo_gender = ttk.Combobox(
+            form_frame, values=["Male", "Female", "Other"], width=15, state="readonly"
         )
-        self.sel_gender.grid(row=4, column=1, padx=8, pady=8)
+        self.combo_gender.grid(row=4, column=1, padx=8, pady=8)
 
-        tk.Label(side_box, text="Fee Status:").grid(
+        tk.Label(form_frame, text="Fee Status:").grid(
             row=5, column=0, sticky="w", padx=8, pady=8
         )
-        self.sel_fee = ttk.Combobox(
-            side_box, values=["Paid", "Pending"], width=15, state="readonly"
+        self.combo_fee = ttk.Combobox(
+            form_frame, values=["Paid", "Pending"], width=15, state="readonly"
         )
-        self.sel_fee.grid(row=5, column=1, padx=8, pady=8)
+        self.combo_fee.grid(row=5, column=1, padx=8, pady=8)
 
-        if self.curr_role == "Admin":
-            actions = tk.Frame(side_box)
-            actions.grid(row=6, columnspan=2, pady=15)
+        if self.role == "Admin":
+            btn_frame = tk.Frame(form_frame)
+            btn_frame.grid(row=6, columnspan=2, pady=15)
 
             tk.Button(
-                actions,
+                btn_frame,
                 text="Add",
-                command=self.save_new_student,
+                command=self.add_student,
                 width=7,
                 bg="#4CAF50",
                 fg="white",
             ).grid(row=0, column=0, padx=2)
             tk.Button(
-                actions,
+                btn_frame,
                 text="Update",
-                command=self.edit_student_record,
+                command=self.update_student,
                 width=7,
                 bg="#FF9800",
                 fg="white",
             ).grid(row=0, column=1, padx=2)
             tk.Button(
-                actions,
+                btn_frame,
                 text="Delete",
-                command=self.remove_student,
+                command=self.delete_student,
                 width=7,
                 bg="#F44336",
                 fg="white",
             ).grid(row=0, column=2, padx=2)
             tk.Button(
-                actions,
+                btn_frame,
                 text="Clear",
-                command=self.reset_student_form,
+                command=self.clear_student_entries,
                 width=24,
                 bg="#9E9E9E",
                 fg="white",
             ).grid(row=1, columnspan=3, pady=5)
         else:
             tk.Label(
-                side_box,
+                form_frame,
                 text="[Read-Only Mode]",
                 fg="red",
                 font=("Arial", 10, "italic"),
             ).grid(row=6, columnspan=2, pady=20)
 
-        data_container = tk.Frame(self.tab_st)
-        data_container.place(x=300, y=10, width=640, height=500)
+        table_frame = tk.Frame(self.tab_students)
+        table_frame.place(x=300, y=10, width=640, height=500)
 
-        k_list = ("roll_no", "name", "course", "email", "gender", "fee_status")
-        l_list = ("Roll No", "Name", "Course", "Email", "Gender", "Fee Status")
-        self.tbl_students = self.build_grid_view(data_container, k_list, l_list)
-        self.tbl_students.bind("<ButtonRelease-1>", self.on_select_student)
+        cols = ("roll_no", "name", "course", "email", "gender", "fee_status")
+        heads = ("Roll No", "Name", "Course", "Email", "Gender", "Fee Status")
+        self.student_table = self.create_treeview(table_frame, cols, heads)
+        self.student_table.bind("<ButtonRelease-1>", self.get_student_cursor)
 
-        self.load_students_data()
+        self.fetch_students()
 
-    def save_new_student(self):
-        payload = (
-            self.st_inputs["roll_no"].get().strip(),
-            self.st_inputs["name"].get().strip(),
-            self.st_inputs["course"].get().strip(),
-            self.st_inputs["email"].get().strip(),
-            self.sel_gender.get(),
-            self.sel_fee.get(),
+    def add_student(self):
+        data = (
+            self.student_entries["roll_no"].get().strip(),
+            self.student_entries["name"].get().strip(),
+            self.student_entries["course"].get().strip(),
+            self.student_entries["email"].get().strip(),
+            self.combo_gender.get(),
+            self.combo_fee.get(),
         )
-        if not payload[0] or not payload[1]:
+        if not data[0] or not data[1]:
             messagebox.showerror("Error", "Roll No and Name are mandatory fields.")
             return
         try:
-            with open_connection() as conn:
+            with get_db_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "INSERT INTO students VALUES (?, ?, ?, ?, ?, ?)", payload
+                    "INSERT INTO students VALUES (?, ?, ?, ?, ?, ?)", data
                 )
 
-            record_log(
-                self.curr_user, f"Added student: {payload[1]} (Roll: {payload[0]})"
-            )
-            self.load_students_data()
-            self.update_roll_lists()
-            self.reset_student_form()
+            log_activity(self.username, f"Added student: {data[1]} (Roll: {data[0]})")
+            self.fetch_students()
+            self.refresh_student_dropdowns()
+            self.clear_student_entries()
             messagebox.showinfo("Success", "Student added successfully!")
         except sqlite3.IntegrityError:
             messagebox.showerror(
                 "Error", "A student with this Roll No already exists."
             )
 
-    def load_students_data(self):
-        with open_connection() as conn:
+    def fetch_students(self):
+        with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM students")
-            records = cursor.fetchall()
+            rows = cursor.fetchall()
 
-        self.tbl_students.delete(*self.tbl_students.get_children())
-        for r in records:
-            self.tbl_students.insert("", "end", values=r)
+        self.student_table.delete(*self.student_table.get_children())
+        for row in rows:
+            self.student_table.insert("", "end", values=row)
 
-    def reset_student_form(self):
-        for box in self.st_inputs.values():
-            box.delete(0, tk.END)
-        self.sel_gender.set("")
-        self.sel_fee.set("")
+    def clear_student_entries(self):
+        for entry in self.student_entries.values():
+            entry.delete(0, tk.END)
+        self.combo_gender.set("")
+        self.combo_fee.set("")
 
-    def on_select_student(self, event):
-        row_id = self.tbl_students.focus()
-        data = self.tbl_students.item(row_id).get("values")
-        if data:
-            self.reset_student_form()
-            self.st_inputs["roll_no"].insert(0, data[0])
-            self.st_inputs["name"].insert(0, data[1])
-            self.st_inputs["course"].insert(0, data[2])
-            self.st_inputs["email"].insert(0, data[3])
-            self.sel_gender.set(data[4])
-            self.sel_fee.set(data[5])
+    def get_student_cursor(self, event):
+        cursor_row = self.student_table.focus()
+        contents = self.student_table.item(cursor_row)
+        row = contents.get("values")
+        if row:
+            self.clear_student_entries()
+            self.student_entries["roll_no"].insert(0, row[0])
+            self.student_entries["name"].insert(0, row[1])
+            self.student_entries["course"].insert(0, row[2])
+            self.student_entries["email"].insert(0, row[3])
+            self.combo_gender.set(row[4])
+            self.combo_fee.set(row[5])
 
-    def edit_student_record(self):
-        payload = (
-            self.st_inputs["name"].get().strip(),
-            self.st_inputs["course"].get().strip(),
-            self.st_inputs["email"].get().strip(),
-            self.sel_gender.get(),
-            self.sel_fee.get(),
-            self.st_inputs["roll_no"].get().strip(),
+    def update_student(self):
+        data = (
+            self.student_entries["name"].get().strip(),
+            self.student_entries["course"].get().strip(),
+            self.student_entries["email"].get().strip(),
+            self.combo_gender.get(),
+            self.combo_fee.get(),
+            self.student_entries["roll_no"].get().strip(),
         )
-        with open_connection() as conn:
+        with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "UPDATE students SET name=?, course=?, email=?, gender=?, fee_status=? WHERE roll_no=?",
-                payload,
+                data,
             )
 
-        record_log(self.curr_user, f"Updated student Roll No: {payload[5]}")
-        self.load_students_data()
-        self.reset_student_form()
+        log_activity(self.username, f"Updated student Roll No: {data[5]}")
+        self.fetch_students()
+        self.clear_student_entries()
         messagebox.showinfo("Success", "Record updated successfully.")
 
-    def remove_student(self):
-        r_num = self.st_inputs["roll_no"].get().strip()
-        if not r_num:
+    def delete_student(self):
+        roll_no = self.student_entries["roll_no"].get().strip()
+        if not roll_no:
             messagebox.showerror("Error", "Select a record to delete.")
             return
 
-        with open_connection() as conn:
+        with get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM students WHERE roll_no=?", (r_num,))
+            cursor.execute("DELETE FROM students WHERE roll_no=?", (roll_no,))
 
-        record_log(self.curr_user, f"Deleted student Roll No: {r_num}")
-        self.load_students_data()
-        self.update_roll_lists()
-        self.reset_student_form()
+        log_activity(self.username, f"Deleted student Roll No: {roll_no}")
+        self.fetch_students()
+        self.refresh_student_dropdowns()
+        self.clear_student_entries()
         messagebox.showinfo("Success", "Record deleted successfully.")
 
-    # 2. Academics Panel
-    def build_academics_panel(self):
-        side_box = tk.LabelFrame(
-            self.tab_ac, text="Grade Entry", font=("Arial", 10, "bold")
+    # ------------------------------------------
+    # TAB 2: ACADEMICS
+    # ------------------------------------------
+    def setup_academics_tab(self):
+        form_frame = tk.LabelFrame(
+            self.tab_academics, text="Grade Entry", font=("Arial", 10, "bold")
         )
-        side_box.place(x=10, y=10, width=280, height=500)
+        form_frame.place(x=10, y=10, width=280, height=500)
 
-        tk.Label(side_box, text="Select Roll No:").grid(
+        tk.Label(form_frame, text="Select Roll No:").grid(
             row=0, column=0, sticky="w", padx=8, pady=10
         )
-        self.dd_marks_roll = ttk.Combobox(side_box, width=15, state="readonly")
-        self.dd_marks_roll.grid(row=0, column=1, padx=8, pady=10)
+        self.combo_marks_roll = ttk.Combobox(form_frame, width=15, state="readonly")
+        self.combo_marks_roll.grid(row=0, column=1, padx=8, pady=10)
 
-        tk.Label(side_box, text="Subject:").grid(
+        tk.Label(form_frame, text="Subject:").grid(
             row=1, column=0, sticky="w", padx=8, pady=10
         )
-        self.txt_subject = tk.Entry(side_box, width=18)
-        self.txt_subject.grid(row=1, column=1, padx=8, pady=10)
+        self.ent_subject = tk.Entry(form_frame, width=18)
+        self.ent_subject.grid(row=1, column=1, padx=8, pady=10)
 
-        tk.Label(side_box, text="Marks Obtained:").grid(
+        tk.Label(form_frame, text="Marks Obtained:").grid(
             row=2, column=0, sticky="w", padx=8, pady=10
         )
-        self.txt_obtained = tk.Entry(side_box, width=18)
-        self.txt_obtained.grid(row=2, column=1, padx=8, pady=10)
+        self.ent_marks = tk.Entry(form_frame, width=18)
+        self.ent_marks.grid(row=2, column=1, padx=8, pady=10)
 
-        tk.Label(side_box, text="Max Marks:").grid(
+        tk.Label(form_frame, text="Max Marks:").grid(
             row=3, column=0, sticky="w", padx=8, pady=10
         )
-        self.txt_max = tk.Entry(side_box, width=18)
-        self.txt_max.insert(0, "100")
-        self.txt_max.grid(row=3, column=1, padx=8, pady=10)
+        self.ent_max_marks = tk.Entry(form_frame, width=18)
+        self.ent_max_marks.insert(0, "100")
+        self.ent_max_marks.grid(row=3, column=1, padx=8, pady=10)
 
-        if self.curr_role in ("Admin", "Teacher"):
+        if self.role in ("Admin", "Teacher"):
             tk.Button(
-                side_box,
+                form_frame,
                 text="Save Grade",
-                command=self.save_grade_entry,
+                command=self.add_marks,
                 bg="#4CAF50",
                 fg="white",
                 width=22,
             ).grid(row=4, columnspan=2, pady=20)
 
-        data_container = tk.Frame(self.tab_ac)
-        data_container.place(x=300, y=10, width=640, height=500)
+        table_frame = tk.Frame(self.tab_academics)
+        table_frame.place(x=300, y=10, width=640, height=500)
 
         cols = (
             "id",
@@ -524,252 +538,261 @@ class MainApp:
             "Percentage",
             "Grade",
         )
-        self.tbl_marks = self.build_grid_view(data_container, cols, heads)
+        self.marks_table = self.create_treeview(table_frame, cols, heads)
 
-        self.load_marks_data()
+        self.fetch_marks()
 
-    def save_grade_entry(self):
-        r_num = self.dd_marks_roll.get()
-        subj = self.txt_subject.get().strip()
+    def add_marks(self):
+        roll_no = self.combo_marks_roll.get()
+        subject = self.ent_subject.get().strip()
         try:
-            score = float(self.txt_obtained.get().strip())
-            total = float(self.txt_max.get().strip())
+            obtained = float(self.ent_marks.get().strip())
+            max_m = float(self.ent_max_marks.get().strip())
         except ValueError:
             messagebox.showerror("Error", "Enter valid numbers for marks.")
             return
 
-        if total <= 0:
+        if max_m <= 0:
             messagebox.showerror("Error", "Max marks must be greater than zero.")
             return
 
-        if score < 0 or score > total:
+        if obtained < 0 or obtained > max_m:
             messagebox.showerror(
                 "Error", "Obtained marks must be between 0 and Max Marks."
             )
             return
 
-        if not r_num or not subj:
+        if not roll_no or not subject:
             messagebox.showerror("Error", "Fill in all fields.")
             return
 
-        pct = round((score / total) * 100, 2)
-        letter_grade = (
+        pct = round((obtained / max_m) * 100, 2)
+        grade = (
             "A" if pct >= 85 else "B" if pct >= 70 else "C" if pct >= 50 else "F"
         )
 
-        with open_connection() as conn:
+        with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO marks (roll_no, subject, marks_obtained, max_marks, percentage, grade) VALUES (?, ?, ?, ?, ?, ?)",
-                (r_num, subj, score, total, pct, letter_grade),
+                (roll_no, subject, obtained, max_m, pct, grade),
             )
 
-        record_log(
-            self.curr_user,
-            f"Logged grade '{letter_grade}' for Roll: {r_num}, Subject: {subj}",
+        log_activity(
+            self.username,
+            f"Logged grade '{grade}' for Roll: {roll_no}, Subject: {subject}",
         )
-        self.load_marks_data()
-        self.txt_subject.delete(0, tk.END)
-        self.txt_obtained.delete(0, tk.END)
+        self.fetch_marks()
+        self.ent_subject.delete(0, tk.END)
+        self.ent_marks.delete(0, tk.END)
         messagebox.showinfo("Success", "Grade recorded.")
 
-    def load_marks_data(self):
-        with open_connection() as conn:
+    def fetch_marks(self):
+        with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM marks")
             rows = cursor.fetchall()
 
-        self.tbl_marks.delete(*self.tbl_marks.get_children())
-        for r in rows:
-            self.tbl_marks.insert("", "end", values=r)
+        self.marks_table.delete(*self.marks_table.get_children())
+        for row in rows:
+            self.marks_table.insert("", "end", values=row)
 
-    # 3. Attendance Panel
-    def build_attendance_panel(self):
-        side_box = tk.LabelFrame(
-            self.tab_at, text="Mark Attendance", font=("Arial", 10, "bold")
+    # ------------------------------------------
+    # TAB 3: ATTENDANCE
+    # ------------------------------------------
+    def setup_attendance_tab(self):
+        form_frame = tk.LabelFrame(
+            self.tab_attendance, text="Mark Attendance", font=("Arial", 10, "bold")
         )
-        side_box.place(x=10, y=10, width=280, height=500)
+        form_frame.place(x=10, y=10, width=280, height=500)
 
-        tk.Label(side_box, text="Select Roll No:").grid(
+        tk.Label(form_frame, text="Select Roll No:").grid(
             row=0, column=0, sticky="w", padx=8, pady=10
         )
-        self.dd_att_roll = ttk.Combobox(side_box, width=15, state="readonly")
-        self.dd_att_roll.grid(row=0, column=1, padx=8, pady=10)
+        self.combo_att_roll = ttk.Combobox(form_frame, width=15, state="readonly")
+        self.combo_att_roll.grid(row=0, column=1, padx=8, pady=10)
 
-        tk.Label(side_box, text="Date (YYYY-MM-DD):").grid(
+        tk.Label(form_frame, text="Date (YYYY-MM-DD):").grid(
             row=1, column=0, sticky="w", padx=8, pady=10
         )
-        self.txt_att_date = tk.Entry(side_box, width=18)
-        self.txt_att_date.insert(0, datetime.now().strftime("%Y-%m-%d"))
-        self.txt_att_date.grid(row=1, column=1, padx=8, pady=10)
+        self.ent_att_date = tk.Entry(form_frame, width=18)
+        self.ent_att_date.insert(0, datetime.now().strftime("%Y-%m-%d"))
+        self.ent_att_date.grid(row=1, column=1, padx=8, pady=10)
 
-        tk.Label(side_box, text="Status:").grid(
+        tk.Label(form_frame, text="Status:").grid(
             row=2, column=0, sticky="w", padx=8, pady=10
         )
-        self.dd_att_status = ttk.Combobox(
-            side_box,
+        self.combo_att_status = ttk.Combobox(
+            form_frame,
             values=["Present", "Absent", "Late"],
             width=15,
             state="readonly",
         )
-        self.dd_att_status.grid(row=2, column=1, padx=8, pady=10)
+        self.combo_att_status.grid(row=2, column=1, padx=8, pady=10)
 
-        if self.curr_role in ("Admin", "Teacher"):
+        if self.role in ("Admin", "Teacher"):
             tk.Button(
-                side_box,
+                form_frame,
                 text="Save Attendance",
-                command=self.save_attendance_entry,
+                command=self.add_attendance,
                 bg="#2196F3",
                 fg="white",
                 width=22,
             ).grid(row=3, columnspan=2, pady=20)
 
-        data_container = tk.Frame(self.tab_at)
-        data_container.place(x=300, y=10, width=640, height=500)
+        table_frame = tk.Frame(self.tab_attendance)
+        table_frame.place(x=300, y=10, width=640, height=500)
 
         cols = ("id", "roll_no", "date", "status")
         heads = ("ID", "Roll No", "Date", "Status")
-        self.tbl_attendance = self.build_grid_view(data_container, cols, heads)
+        self.att_table = self.create_treeview(table_frame, cols, heads)
 
-        self.load_attendance_data()
+        self.fetch_attendance()
 
-    def save_attendance_entry(self):
-        r_num = self.dd_att_roll.get()
-        d_str = self.txt_att_date.get().strip()
-        st = self.dd_att_status.get()
+    def add_attendance(self):
+        roll_no = self.combo_att_roll.get()
+        date_str = self.ent_att_date.get().strip()
+        status = self.combo_att_status.get()
 
-        if not r_num or not d_str or not st:
+        if not roll_no or not date_str or not status:
             messagebox.showerror("Error", "All fields are required.")
             return
 
-        with open_connection() as conn:
+        with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO attendance (roll_no, date, status) VALUES (?, ?, ?)",
-                (r_num, d_str, st),
+                (roll_no, date_str, status),
             )
 
-        record_log(self.curr_user, f"Marked {st} for Roll: {r_num} on {d_str}")
-        self.load_attendance_data()
+        log_activity(
+            self.username, f"Marked {status} for Roll: {roll_no} on {date_str}"
+        )
+        self.fetch_attendance()
         messagebox.showinfo("Success", "Attendance logged.")
 
-    def load_attendance_data(self):
-        with open_connection() as conn:
+    def fetch_attendance(self):
+        with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM attendance")
             rows = cursor.fetchall()
 
-        self.tbl_attendance.delete(*self.tbl_attendance.get_children())
-        for r in rows:
-            self.tbl_attendance.insert("", "end", values=r)
+        self.att_table.delete(*self.att_table.get_children())
+        for row in rows:
+            self.att_table.insert("", "end", values=row)
 
-    # 4. Analytics Panel
-    def build_analytics_panel(self):
+    # ------------------------------------------
+    # TAB 4: DATA ANALYTICS
+    # ------------------------------------------
+    def setup_analytics_tab(self):
         tk.Button(
-            self.tab_an,
+            self.tab_analytics,
             text="Refresh Visualizations",
-            command=self.draw_charts,
+            command=self.render_charts,
             bg="#2196F3",
             fg="white",
             font=("Arial", 10, "bold"),
         ).pack(pady=10)
 
-        self.charts_container = tk.Frame(self.tab_an)
-        self.charts_container.pack(fill="both", expand=True)
+        self.chart_frame = tk.Frame(self.tab_analytics)
+        self.chart_frame.pack(fill="both", expand=True)
 
-        self.draw_charts()
+        self.render_charts()
 
-    def draw_charts(self):
-        for widget in self.charts_container.winfo_children():
+    def render_charts(self):
+        for widget in self.chart_frame.winfo_children():
             widget.destroy()
 
-        with open_connection() as conn:
+        with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT grade, COUNT(*) FROM marks GROUP BY grade ORDER BY grade"
             )
-            g_data = dict(cursor.fetchall())
+            grade_data = dict(cursor.fetchall())
 
             cursor.execute(
                 "SELECT status, COUNT(*) FROM attendance GROUP BY status"
             )
-            a_data = dict(cursor.fetchall())
+            att_data = dict(cursor.fetchall())
 
         fig = Figure(figsize=(9, 4), dpi=100)
 
         ax1 = fig.add_subplot(121)
-        grade_keys = ["A", "B", "C", "F"]
-        counts = [g_data.get(k, 0) for k in grade_keys]
-        ax1.bar(
-            grade_keys, counts, color=["#4CAF50", "#2196F3", "#FF9800", "#F44336"]
-        )
+        grades = ["A", "B", "C", "F"]
+        counts = [grade_data.get(g, 0) for g in grades]
+        ax1.bar(grades, counts, color=["#4CAF50", "#2196F3", "#FF9800", "#F44336"])
         ax1.set_title("Grade Distribution")
         ax1.set_xlabel("Grade")
         ax1.set_ylabel("Number of Students")
 
         ax2 = fig.add_subplot(122)
-        att_labels = list(a_data.keys()) if a_data else ["No Data"]
-        att_counts = list(a_data.values()) if a_data else [1]
+        att_labels = list(att_data.keys()) if att_data else ["No Data"]
+        att_counts = list(att_data.values()) if att_data else [1]
         ax2.pie(att_counts, labels=att_labels, autopct="%1.1f%%", startangle=90)
         ax2.set_title("Overall Attendance Spread")
 
         fig.tight_layout()
 
-        canvas = FigureCanvasTkAgg(fig, master=self.charts_container)
+        canvas = FigureCanvasTkAgg(fig, master=self.chart_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill="both", expand=True)
 
-    # 5. Security Panel
-    def build_security_panel(self):
+    # ------------------------------------------
+    # TAB 5: SECURITY & AUDIT LOGS
+    # ------------------------------------------
+    def setup_security_tab(self):
         tk.Label(
-            self.tab_sc,
+            self.tab_security,
             text="System Audit & Activity Logs",
             font=("Arial", 12, "bold"),
         ).pack(pady=10)
 
-        box = tk.Frame(self.tab_sc)
-        box.pack(fill="both", expand=True, padx=20, pady=10)
+        log_frame = tk.Frame(self.tab_security)
+        log_frame.pack(fill="both", expand=True, padx=20, pady=10)
 
         cols = ("id", "username", "action", "timestamp")
         heads = ("Log ID", "User", "Action Executed", "Timestamp")
-        self.tbl_logs = self.build_grid_view(box, cols, heads)
+        self.log_table = self.create_treeview(log_frame, cols, heads)
 
         tk.Button(
-            self.tab_sc,
+            self.tab_security,
             text="Refresh Audit Log",
-            command=self.load_audit_logs,
+            command=self.fetch_logs,
             bg="#9E9E9E",
             fg="white",
         ).pack(pady=10)
 
-        self.load_audit_logs()
+        self.fetch_logs()
 
-    def load_audit_logs(self):
-        with open_connection() as conn:
+    def fetch_logs(self):
+        with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT * FROM activity_logs ORDER BY id DESC LIMIT 50"
             )
             rows = cursor.fetchall()
 
-        self.tbl_logs.delete(*self.tbl_logs.get_children())
-        for r in rows:
-            self.tbl_logs.insert("", "end", values=r)
+        self.log_table.delete(*self.log_table.get_children())
+        for row in rows:
+            self.log_table.insert("", "end", values=row)
 
-    def update_roll_lists(self):
-        with open_connection() as conn:
+    def refresh_student_dropdowns(self):
+        with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT roll_no FROM students")
             rolls = [r[0] for r in cursor.fetchall()]
 
-        if hasattr(self, "dd_marks_roll"):
-            self.dd_marks_roll["values"] = rolls
-        if hasattr(self, "dd_att_roll"):
-            self.dd_att_roll["values"] = rolls
+        if hasattr(self, "combo_marks_roll"):
+            self.combo_marks_roll["values"] = rolls
+        if hasattr(self, "combo_att_roll"):
+            self.combo_att_roll["values"] = rolls
 
 
+# ==========================================
+# MAIN LAUNCHER
+# ==========================================
 if __name__ == "__main__":
-    setup_tables()
-    app_root = tk.Tk()
-    LoginView(app_root)
-    app_root.mainloop()
+    init_db()
+    root = tk.Tk()
+    app = LoginWindow(root)
+    root.mainloop()
